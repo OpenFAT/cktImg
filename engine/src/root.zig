@@ -7,6 +7,7 @@
 //! |------|-----------|
 //! | `place(gpa, cfg, lib, sources, diag)` | an owned `Placed` |
 //! | `Pipeline.run` | a borrowed `Placed`, pages reused across documents |
+//! | `netlist.parse` → `guessRoles` → `arrange` → `Placed.init` | the stages, groups judged |
 //! | `netlist.parse` → `guessRoles` → `Schematic.build` → `layout` → `Placed.init` | every stage, each usable alone |
 //!
 //! The library draws nothing and knows no device: the caller's `Library`
@@ -78,10 +79,53 @@ pub fn place(
     defer nl.deinit(gpa);
     const roles = try guessRoles(gpa, &nl);
     defer gpa.free(roles);
-    var s = try Schematic.build(gpa, &nl, roles, lib);
+    var s = try arrange(gpa, &nl, roles, lib, cfg);
     defer s.deinit();
-    try layout(gpa, &s, cfg);
     return Placed.init(gpa, &s, &nl);
+}
+
+/// `Schematic.build` and `layout`, with the groups cktImg recognized (G1–G3,
+/// docs/ALGORITHM.md §2a) judged by what they cost the drawing: when the
+/// grouped drawing needed a wire to give way, or has a crossing, overlap,
+/// contact or bend, the drawing without them (hinted groups kept) is made
+/// too, and the one with fewer crossings, overlaps and contacts, then fewer
+/// named nets, then fewer bends is returned; the grouped one on a tie. The
+/// caller owns the result.
+pub fn arrange(gpa: Allocator, nl: *const Netlist, roles: []const Role, lib: *Library, cfg: *const Config) PlaceError!Schematic {
+    var s = try Schematic.build(gpa, nl, roles, lib);
+    errdefer s.deinit();
+    const named = count(s.labeled);
+    try layout(gpa, &s, cfg);
+    const grouped = cost(&s);
+    const recognized = for (s.groups) |g| {
+        if (!g.hinted) break true;
+    } else false;
+    if (!recognized or std.mem.eql(u32, &grouped, &.{ 0, named, 0 })) return s;
+    var without = nl.*; // shares the circuit; only recognition differs
+    without.grouping = false;
+    var p = try Schematic.build(gpa, &without, roles, lib);
+    errdefer p.deinit();
+    try layout(gpa, &p, cfg);
+    const plain = cost(&p);
+    if (std.mem.order(u32, &plain, &grouped) != .lt) {
+        p.deinit();
+        return s;
+    }
+    s.deinit();
+    return p;
+}
+
+/// What a drawing costs, compared in order: crossings, overlaps and
+/// contacts; named nets; bends and dropped orders.
+fn cost(s: *const Schematic) [3]u32 {
+    const t = s.stats;
+    return .{ t.crossings + t.overlaps + t.contacts, t.labeled_nets, t.bent + t.conflicts };
+}
+
+fn count(flags: []const bool) u32 {
+    var n: u32 = 0;
+    for (flags) |f| n += @intFromBool(f);
+    return n;
 }
 
 /// `place` for many documents with one set of pages: each `run` returns a
@@ -111,8 +155,7 @@ pub const Pipeline = struct {
         const tmp = self.scratch.allocator();
         var nl = try netlist.parse(tmp, sources, diag);
         const roles = try guessRoles(tmp, &nl);
-        var s = try Schematic.build(tmp, &nl, roles, self.lib);
-        try layout(tmp, &s, self.cfg);
+        var s = try arrange(tmp, &nl, roles, self.lib, self.cfg);
         self.current = try Placed.init(self.out.allocator(), &s, &nl);
         _ = self.scratch.reset(.retain_capacity);
         return &self.current.?;

@@ -192,6 +192,116 @@ fn mergeLines(gpa: Allocator, s: *const Schematic, kept: []bool, cx: []u32, cy: 
     return .{ try compact(gpa, &cols, cx), try compact(gpa, &rows, cy) };
 }
 
+/// L10: each group's members (G1–G4) share a row (a pair, a mirror, a
+/// cross-coupled pair) or a column (a stack). Their classes merge, member by
+/// member, wherever no order constraint of the round (edges, joins: L1, L3)
+/// runs between the two classes either way and no two nodes would share a
+/// cell; elsewhere the members keep what the wires gave them, so grouping
+/// never closes a cycle or contradicts a join. A recognized group's members
+/// merge only where the wires already keep them side by side: their columns
+/// at most two order constraints apart (a pair's through its tail's copies,
+/// a mirror's through its gate line). Renumbers `cx`, `cy`, their counts and
+/// the constraints in place.
+fn alignGroups(gpa: Allocator, s: *const Schematic, cx: []u32, cy: []u32, nx: *usize, ny: *usize, xc: []Con, yc: []Con) !void {
+    if (s.groups.len == 0) return;
+    const n = s.nodes.len;
+    const node_of = try gpa.alloc(u32, s.device_name.len);
+    defer gpa.free(node_of);
+    @memset(node_of, none);
+    for (s.nodes.items(.kind), s.nodes.items(.ref), s.nodes.items(.group), 0..) |k, r, g, i| {
+        if (k == .device and g == i) node_of[r] = @intCast(i);
+    }
+    // Column successors, for side by side.
+    const off = try gpa.alloc(u32, nx.* + 1);
+    defer gpa.free(off);
+    @memset(off, 0);
+    for (xc) |c| off[c.a + 1] += 1;
+    for (1..off.len) |i| off[i] += off[i - 1];
+    const succ = try gpa.alloc(u32, xc.len);
+    defer gpa.free(succ);
+    {
+        const fill = try gpa.dupe(u32, off[0..nx.*]);
+        defer gpa.free(fill);
+        for (xc) |c| {
+            succ[fill[c.a]] = c.b;
+            fill[c.a] += 1;
+        }
+    }
+    const next: Next = .{ .off = off, .succ = succ };
+    var rows = try Classes.init(gpa, ny.*);
+    defer rows.deinit(gpa);
+    var cols = try Classes.init(gpa, nx.*);
+    defer cols.deinit(gpa);
+    const stamp = try gpa.alloc(u32, @max(nx.*, ny.*));
+    defer gpa.free(stamp);
+    @memset(stamp, 0);
+    var tick: u32 = 0;
+    var mapped: std.ArrayList(Con) = .empty;
+    defer mapped.deinit(gpa);
+    var merged: [2]bool = .{ false, false }; // columns, rows
+    for (s.groups) |grp| {
+        const in_row = grp.kind != .stack;
+        const same, const same_c, const other, const other_c, const cons = if (in_row)
+            .{ &rows, cy, &cols, cx, yc }
+        else
+            .{ &cols, cx, &rows, cy, xc };
+        for (grp.members[0 .. grp.members.len - 1], grp.members[1..]) |da, db| {
+            const u = node_of[da];
+            const v = node_of[db];
+            if (u == none or v == none) continue;
+            const a = same.find(same_c[u]);
+            const b = same.find(same_c[v]);
+            if (a == b) continue;
+            if (in_row and !grp.hinted and !next.near(cx[u], cx[v])) continue;
+            // Two nodes on one cell: the two classes share a class across.
+            tick += 1;
+            for (0..n) |w| if (same.find(same_c[w]) == a) {
+                stamp[other.find(other_c[w])] = tick;
+            };
+            const clash = for (0..n) |w| {
+                if (same.find(same_c[w]) == b and stamp[other.find(other_c[w])] == tick) break true;
+            } else false;
+            if (clash) continue;
+            // An order between the two, either way.
+            mapped.clearRetainingCapacity();
+            for (cons) |c| try mapped.append(gpa, .{ .a = same.find(c.a), .b = same.find(c.b), .join = c.join });
+            const count = if (in_row) ny.* else nx.*;
+            if (try reachable(gpa, count, mapped.items, a, b) or try reachable(gpa, count, mapped.items, b, a)) continue;
+            same.merge(a, b);
+            merged[@intFromBool(in_row)] = true;
+        }
+    }
+    for ([2]*Classes{ &cols, &rows }, [2][]u32{ cx, cy }, [2]*usize{ nx, ny }, [2][]Con{ xc, yc }, merged) |classes, c, count, cons, any| {
+        if (!any) continue;
+        const id = try gpa.alloc(u32, count.*);
+        defer gpa.free(id);
+        count.* = try compact(gpa, classes, id);
+        for (c) |*k| k.* = id[k.*];
+        for (cons) |*k| {
+            k.a = id[k.a];
+            k.b = id[k.b];
+            std.debug.assert(k.a != k.b); // merged classes had no order between them
+        }
+    }
+}
+
+/// Each class's successors under one axis's order constraints (CSR).
+const Next = struct {
+    off: []const u32,
+    succ: []const u32,
+
+    fn of(x: Next, c: u32) []const u32 {
+        return x.succ[x.off[c]..x.off[c + 1]];
+    }
+    /// One class follows the other through at most one class between.
+    fn near(x: Next, a: u32, b: u32) bool {
+        for ([2][2]u32{ .{ a, b }, .{ b, a } }) |ab| for (x.of(ab[0])) |w| {
+            if (w == ab[1] or std.mem.indexOfScalar(u32, x.of(w), ab[1]) != null) return true;
+        };
+        return false;
+    }
+};
+
 // ===========================================================================
 // Copies of a net's own node (S5)
 // ===========================================================================
@@ -807,7 +917,7 @@ fn place(gpa: Allocator, s: *Schematic, g: *const Layout, may_redeal: bool, work
     defer gpa.free(cx);
     const cy = try gpa.alloc(u32, n);
     defer gpa.free(cy);
-    const nx, const ny = try mergeLines(gpa, s, kept, cx, cy);
+    var nx, var ny = try mergeLines(gpa, s, kept, cx, cy);
 
     // L1/L3: order constraints.
     var xc: std.ArrayList(Con) = .empty;
@@ -840,6 +950,8 @@ fn place(gpa: Allocator, s: *Schematic, g: *const Layout, may_redeal: bool, work
         if (may_redeal and try redealCycles(gpa, s, nx, ny, cx, cy, xc.items, yc.items)) return .redo;
         return .{ .drop = worstWire(s, bad.items) };
     }
+    // L10: groups share a row or a column where nothing above parts them.
+    try alignGroups(gpa, s, cx, cy, &nx, &ny, xc.items, yc.items);
 
     // L5, L6, L8: levels; separate nodes that share a cell, repeat.
     const lx = try gpa.alloc(i32, nx);

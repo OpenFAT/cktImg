@@ -18,9 +18,8 @@ fn draw(gpa: std.mem.Allocator, lib: *np.Library, cfg: *const np.Config, sources
     defer nl.deinit(gpa);
     const roles = try np.guessRoles(gpa, &nl);
     defer gpa.free(roles);
-    var s = try np.Schematic.build(gpa, &nl, roles, lib);
+    var s = try np.arrange(gpa, &nl, roles, lib, cfg);
     defer s.deinit();
-    try np.layout(gpa, &s, cfg);
     var p = try np.Placed.init(gpa, &s, &nl);
     defer p.deinit();
     return .{ .svg = try svg.alloc(gpa, &p, lib, .{ .caption = if (caption) nl.title else "" }), .stats = s.stats };
@@ -117,6 +116,11 @@ fn dump(gpa: std.mem.Allocator, lib: *np.Library, text: []const u8) !void {
     for (s.joins.items, 0..) |j, i| pr("join {d} {t} net {s} p {d} q {d} active {}\n", .{ i, j.kind, s.net_name[j.net], j.p, j.q, j.active });
     for (s.routes.items) |r| pr("route {t} {d} net {s} {any}\n", .{ r.kind, r.id, s.net_name[r.net], r.pts[0..r.len] });
     for (s.labeled, 0..) |l, n| if (l) pr("labeled {s}\n", .{s.net_name[n]});
+    for (s.groups) |g| {
+        pr("group {t}", .{g.kind});
+        for (g.members) |d| pr(" {s}", .{s.device_name[d]});
+        pr("\n", .{});
+    }
 }
 
 fn section(gpa: std.mem.Allocator, lib: *np.Library, w: *std.Io.Writer, c: textbook.Circuit) !void {

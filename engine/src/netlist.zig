@@ -47,6 +47,18 @@
 //! primitive is read as the device it names (`sky130_fd_pr__nfet_01v8` is a
 //! MOS, `…res…`/`…cap…` a resistor or capacitor; see `pdkPrimitive`); any
 //! other master is a block with ports `p1`..`pN`.
+//!
+//! ## Grouping hints
+//!
+//! At the top level of the deck (and so in the body `cktimg-json` draws for
+//! a file of definitions), comment directives steer which devices the layout
+//! keeps together (docs/ALGORITHM.md §2a):
+//!
+//!     *@ group pair m1 m2      also mirror, stack, cross
+//!     *@ nogroup m9            in no group, hinted or recognized
+//!     *@ grouping off          no recognition; hinted groups still hold
+//!
+//! A name the deck has no device for is skipped.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -102,6 +114,17 @@ pub const Subckt = struct {
 };
 
 pub const PortSide = enum { left, right, top, bottom };
+
+/// What a `*@ group` hint asks the layout to keep together.
+pub const GroupKind = enum { pair, mirror, stack, cross };
+
+/// One `*@ group <kind> <devices>` or `*@ nogroup <devices>` line.
+pub const Hint = struct {
+    /// Null for `*@ nogroup`: the devices join no group.
+    kind: ?GroupKind,
+    /// The named devices the deck has, in the order named, each once.
+    devices: []const EdgeId,
+};
 
 /// `Device.def` of a device that is not a subcircuit block.
 pub const no_def: u32 = std.math.maxInt(u32);
@@ -187,6 +210,10 @@ pub const Netlist = struct {
     models: std.StringHashMapUnmanaged([]const u8),
     /// Every `.subckt` definition, in file order.
     defs: []const Subckt,
+    /// The top level's `*@ group` and `*@ nogroup` lines, in file order.
+    hints: []const Hint,
+    /// False after `*@ grouping off`: only hinted groups are kept together.
+    grouping: bool,
 
     /// The definition a `subckt` block device instantiates.
     pub fn defOf(self: *const Netlist, e: EdgeId) ?*const Subckt {
@@ -263,6 +290,7 @@ pub fn parse(gpa: Allocator, sources: []const []const u8, diag: ?*Diagnostic) Er
     var graph = try p.buildGraph();
     errdefer graph.deinit(gpa);
 
+    try p.collectHints();
     const analyses = try p.collectAnalyses(graph.edges.items(.kind));
 
     return .{
@@ -275,6 +303,8 @@ pub fn parse(gpa: Allocator, sources: []const []const u8, diag: ?*Diagnostic) Er
         .device_ids = p.device_ids,
         .models = p.models,
         .defs = p.defs.items,
+        .hints = p.hints.items,
+        .grouping = p.grouping,
     };
 }
 
@@ -338,6 +368,8 @@ const Pass = struct {
     net_ids: std.StringHashMapUnmanaged(VertexId) = .empty,
     device_ids: std.StringHashMapUnmanaged(EdgeId) = .empty,
     tokens: std.ArrayList([]const u8) = .empty,
+    hints: std.ArrayList(Hint) = .empty,
+    grouping: bool = true,
 
     /// Records where a card failed. Because `texts[i]` is a byte-for-byte
     /// lowercase copy of `sources[i]`, the same offset finds the original.
@@ -625,6 +657,53 @@ const Pass = struct {
             gop.value_ptr.* = try b.addVertex(self.gpa, .{ .name = name });
         }
         return gop.value_ptr.*;
+    }
+
+    /// The `*@` grouping lines of every source's top level: outside
+    /// `.subckt` and `.control` blocks, before `.end`. Runs after the graph,
+    /// so names resolve to devices.
+    fn collectHints(self: *Pass) Error!void {
+        for (self.texts, 0..) |text, si| {
+            var c = Cards.init(text, si == 0);
+            var depth: usize = 0; // `.subckt` nesting
+            var control = false;
+            while (c.nextLine()) |raw| {
+                const t = std.mem.trimStart(u8, raw, " \t");
+                if (depth == 0 and !control and std.mem.startsWith(u8, t, "*@")) {
+                    try self.hint(t[2..]);
+                    continue;
+                }
+                const l = Cards.content(raw) orelse continue;
+                const head = l[0 .. std.mem.indexOfAny(u8, l, " \t") orelse l.len];
+                if (eql(head, ".subckt")) depth += 1;
+                if (eql(head, ".ends")) depth -|= 1;
+                if (eql(head, ".control")) control = true;
+                if (eql(head, ".endc")) control = false;
+                if (eql(head, ".end") and depth == 0 and !control) break;
+            }
+        }
+    }
+
+    /// One top-level `*@` line (lowercase, after the `*@`); other verbs (the
+    /// side directives) are not hints.
+    fn hint(self: *Pass, text: []const u8) Error!void {
+        var it = std.mem.tokenizeAny(u8, text, " \t,");
+        const verb = it.next() orelse return;
+        var kind: ?GroupKind = null;
+        if (eql(verb, "grouping")) {
+            if (it.next()) |w| if (eql(w, "off")) {
+                self.grouping = false;
+            };
+            return;
+        } else if (eql(verb, "group")) {
+            kind = std.meta.stringToEnum(GroupKind, it.next() orelse return) orelse return;
+        } else if (!eql(verb, "nogroup")) return;
+        var devices: std.ArrayList(EdgeId) = .empty;
+        while (it.next()) |name| {
+            const e = self.device_ids.get(name) orelse continue;
+            if (std.mem.indexOfScalar(EdgeId, devices.items, e) == null) try devices.append(self.arena, e);
+        }
+        try self.hints.append(self.arena, .{ .kind = kind, .devices = devices.items });
     }
 
     // -- pass 3 ------------------------------------------------------------
@@ -1398,6 +1477,43 @@ test "subckt: *@ expand flattens, with ngspice's names; ground stays global" {
     try testing.expectEqualDeep(&[_][]const u8{ "out", "x1.xa.inner" }, names(&nl, nl.graph.members(r), &buf));
     try testing.expectEqual(ground, nl.graph.members(nl.device("r.x1.xb.r3").?)[1]);
     try testing.expectEqual(7, nl.graph.edgeCount()); // v1 and six resistors
+}
+
+test "hints: the top level's *@ group, nogroup and grouping off; a body's, unknown names and kinds skipped" {
+    const gpa = testing.allocator;
+    var nl = try parse(gpa, &.{
+        \\t
+        \\.subckt s a b
+        \\*@ group pair r1 r2
+        \\*@ grouping off
+        \\R1 a b 1
+        \\.ends
+        \\*@ group Pair M1, M2 m9 m1
+        \\*@ group mirror m3 m4
+        \\*@ group triple m1 m2
+        \\*@ nogroup m4
+        \\*@ left m1
+        \\M1 d1 g1 t 0 nmos
+        \\M2 d2 g2 t 0 nmos
+        \\M3 d1 d1 vdd vdd pmos
+        \\M4 d2 d1 vdd vdd pmos
+        \\.end
+        \\*@ grouping off
+    }, null);
+    defer nl.deinit(gpa);
+    try testing.expect(nl.grouping);
+    try testing.expectEqual(3, nl.hints.len);
+    try testing.expectEqual(GroupKind.pair, nl.hints[0].kind.?);
+    try testing.expectEqualSlices(EdgeId, &.{ nl.device("m1").?, nl.device("m2").? }, nl.hints[0].devices);
+    try testing.expectEqual(GroupKind.mirror, nl.hints[1].kind.?);
+    try testing.expectEqualSlices(EdgeId, &.{ nl.device("m3").?, nl.device("m4").? }, nl.hints[1].devices);
+    try testing.expect(nl.hints[2].kind == null);
+    try testing.expectEqualSlices(EdgeId, &.{nl.device("m4").?}, nl.hints[2].devices);
+
+    var off = try parse(gpa, &.{"t\n*@ grouping off\nR1 a 0 1\n"}, null);
+    defer off.deinit(gpa);
+    try testing.expect(!off.grouping);
+    try testing.expectEqual(0, off.hints.len);
 }
 
 test "subckt: errors name the instance" {

@@ -92,6 +92,18 @@ pub fn hasSidePin(s: *const Schematic, d: u32) bool {
 
 pub const PairHalf = enum(u2) { none, left, right };
 
+pub const GroupKind = netlist.GroupKind;
+
+/// G1–G4 (docs/ALGORITHM.md §2a): devices the layout keeps in one row (a
+/// pair, a mirror, a cross-coupled pair) or one column (a stack), L10.
+pub const Group = struct {
+    kind: GroupKind,
+    /// Its devices: a row's left to right by `x_key`, a stack's as named.
+    members: []const u32,
+    /// Named by a `*@ group` hint (G4), not recognized (G1–G3).
+    hinted: bool,
+};
+
 pub const DeviceInfo = struct {
     /// In the schematic graph: drivers of terminal nets and pinless devices
     /// are not (R3).
@@ -239,6 +251,8 @@ pub const Schematic = struct {
     roles: []const Role,
 
     devices: std.MultiArrayList(DeviceInfo) = .empty,
+    /// G1–G4: what the layout keeps together (L10).
+    groups: []const Group = &.{},
     nodes: std.MultiArrayList(Node) = .empty,
     pins: std.MultiArrayList(Pin) = .empty,
     edges: std.ArrayList(Edge) = .empty,
@@ -472,7 +486,7 @@ pub fn build(gpa: Allocator, nl: *const netlist.Netlist, roles: []const Role, li
     try s.devices.resize(a, circuit.edgeCount());
     @memcpy(s.devices.items(.class), classes);
 
-    try orient(gpa, &s, circuit);
+    try orient(gpa, &s, nl);
     try wire(gpa, &s, circuit);
     try splitSupernodes(gpa, &s);
     for (0..s.labeled.len) |n| {
@@ -663,7 +677,8 @@ fn bfsLevels(gpa: Allocator, c: *const Conn, start: u32) ![]u32 {
     return level;
 }
 
-fn orient(gpa: Allocator, s: *Schematic, circuit: *const Circuit.Graph) !void {
+fn orient(gpa: Allocator, s: *Schematic, nl: *const netlist.Netlist) !void {
+    const circuit = &nl.graph;
     const n_nets = circuit.vertexCount();
     const n_devs = circuit.edgeCount();
     const roles = s.roles;
@@ -758,6 +773,8 @@ fn orient(gpa: Allocator, s: *Schematic, circuit: *const Circuit.Graph) !void {
     defer gpa.free(fixed);
     @memset(fixed, false);
     differentialPairs(s, circuit, fixed);
+    try findGroups(gpa, s, nl);
+    mirrorGroups(s, fixed);
     mirrorPairs(s, circuit, fixed);
     settle(s, circuit);
 }
@@ -931,6 +948,217 @@ fn mirrorPairs(s: *Schematic, circuit: *const Circuit.Graph, fixed: []bool) void
         if (!fixed[dev[hi]] and side[hi] == .right) flip_x[dev[hi]] = !flip_x[dev[hi]];
         fixed[dev[lo]] = true;
         fixed[dev[hi]] = true;
+    }
+}
+
+// ===========================================================================
+// Stage 2a — Groups (G1–G4)
+// ===========================================================================
+
+/// Recognition looks at most this many transistors on one net (a gate line,
+/// a tail); a net with more forms no pair or mirror.
+// ponytail: a fixed scan buffer; a bucket sort by (class, source) if a mirror of 16+ outputs shows up.
+const group_scan_max = 16;
+
+/// G1–G3 recognize groups among drawn transistors, unless the deck says
+/// `*@ grouping off`; G4 adds the deck's hinted groups. Hints win: a device
+/// a hint names (`*@ nogroup` included) joins no recognized group on that
+/// hint's axis, and a `nogroup` device joins no group at all. A device is
+/// in at most one recognized row group.
+fn findGroups(gpa: Allocator, s: *Schematic, nl: *const netlist.Netlist) !void {
+    const circuit = &nl.graph;
+    const n_devs = circuit.edgeCount();
+    // Per device, rows then columns: already in a group, or named by a hint.
+    const taken = try gpa.alloc([2]bool, n_devs);
+    defer gpa.free(taken);
+    @memset(taken, .{ false, false });
+    const banned = try gpa.alloc(bool, n_devs);
+    defer gpa.free(banned);
+    @memset(banned, false);
+    for (nl.hints) |h| for (h.devices) |e| {
+        const d = e.index();
+        if (h.kind) |k| {
+            taken[d][axisOf(k)] = true;
+        } else {
+            taken[d] = .{ true, true };
+            banned[d] = true;
+        }
+    };
+
+    var list: std.ArrayList(Group) = .empty;
+    if (nl.grouping) {
+        try crossPairs(s, circuit, taken, &list);
+        try diffPairs(s, circuit, taken, &list);
+        try currentMirrors(s, circuit, taken, &list);
+    }
+    // G4: the hints, minus `nogroup` devices and devices not drawn.
+    const kept = s.devices.items(.kept);
+    for (nl.hints) |h| {
+        const kind = h.kind orelse continue;
+        var members: [max_pins]u32 = undefined;
+        var n: usize = 0;
+        for (h.devices) |e| {
+            const d = e.index();
+            if (!kept[d] or banned[d] or n == members.len) continue;
+            members[n] = d;
+            n += 1;
+        }
+        if (n >= 2) try addGroup(s, &list, kind, members[0..n], taken, true);
+    }
+    s.groups = list.items;
+    for (s.groups) |g| std.debug.assert(g.members.len >= 2);
+}
+
+/// 0: a row group (pair, mirror, cross-coupled pair); 1: a column (stack).
+fn axisOf(kind: GroupKind) usize {
+    return @intFromBool(kind == .stack);
+}
+
+/// Appends a group of `members` (copied; a row group sorted by `x_key`) and
+/// marks them taken on its axis.
+fn addGroup(s: *Schematic, list: *std.ArrayList(Group), kind: GroupKind, members: []const u32, taken: [][2]bool, hinted: bool) !void {
+    std.debug.assert(members.len >= 2);
+    const a = s.arena.allocator();
+    const own = try a.dupe(u32, members);
+    if (kind != .stack) std.mem.sort(u32, own, @as([]const u64, s.devices.items(.x_key)), struct {
+        fn lt(keys: []const u64, x: u32, y: u32) bool {
+            return keys[x] < keys[y];
+        }
+    }.lt);
+    for (own) |d| taken[d][axisOf(kind)] = true;
+    try list.append(a, .{ .kind = kind, .members = own, .hinted = hinted });
+}
+
+/// Drain, gate and source of a drawn transistor (MOS, JFET and MESFET
+/// d g s; BJT c b e), else null.
+fn terminals(s: *const Schematic, circuit: *const Circuit.Graph, d: u32) ?[3]u32 {
+    if (!s.devices.items(.kept)[d]) return null;
+    switch (s.device_kind[d]) {
+        .mosfet, .bjt, .jfet, .mesfet => {},
+        else => return null,
+    }
+    const m = circuit.members(EdgeId.from(d));
+    if (m.len < 3) return null;
+    return .{ m[0].index(), m[1].index(), m[2].index() };
+}
+
+/// Same kind and class: two NMOS, never an NMOS and a PMOS.
+fn sameType(s: *const Schematic, a: u32, b: u32) bool {
+    const class = s.devices.items(.class);
+    return s.device_kind[a] == s.device_kind[b] and class[a] == class[b];
+}
+
+fn isRail(r: Role) bool {
+    return r == .supply or r == .sink;
+}
+
+/// The distinct transistors with terminal `t` (0 drain, 1 gate, 2 source) on
+/// `net`, in device order; null when there are more than `out` holds.
+fn onTerminal(s: *const Schematic, circuit: *const Circuit.Graph, net: u32, t: usize, out: *[group_scan_max]u32) ?[]u32 {
+    var n: usize = 0;
+    for (circuit.incident(VertexId.from(net))) |e| {
+        const d = e.index();
+        const ts = terminals(s, circuit, d) orelse continue;
+        if (ts[t] != net or (n > 0 and out[n - 1] == d)) continue;
+        if (n == out.len) return null;
+        out[n] = d;
+        n += 1;
+    }
+    return out[0..n];
+}
+
+/// G1: two transistors of one type whose gates take each other's drains.
+fn crossPairs(s: *Schematic, circuit: *const Circuit.Graph, taken: [][2]bool, list: *std.ArrayList(Group)) !void {
+    for (0..circuit.edgeCount()) |i| {
+        const a: u32 = @intCast(i);
+        if (taken[a][0]) continue;
+        const ta = terminals(s, circuit, a) orelse continue;
+        if (isRail(s.roles[ta[0]]) or isRail(s.roles[ta[1]]) or ta[0] == ta[1]) continue;
+        var buf: [group_scan_max]u32 = undefined;
+        const drains = onTerminal(s, circuit, ta[1], 0, &buf) orelse continue;
+        for (drains) |b| {
+            if (b == a or taken[b][0] or !sameType(s, a, b)) continue;
+            const tb = terminals(s, circuit, b).?;
+            if (tb[1] != ta[0]) continue;
+            std.debug.assert(tb[0] == ta[1] and tb[0] != ta[0]);
+            try addGroup(s, list, .cross, &.{ a, b }, taken, false);
+            break;
+        }
+    }
+}
+
+/// G2: two transistors of one type are the only transistor sources on a
+/// net, their gates and drains distinct. The net is a tail: no rail, and no
+/// gate on it (pass transistors meeting at a gate's input are no pair).
+fn diffPairs(s: *Schematic, circuit: *const Circuit.Graph, taken: [][2]bool, list: *std.ArrayList(Group)) !void {
+    for (s.roles, 0..) |role, n| {
+        if (isRail(role)) continue;
+        var buf: [group_scan_max]u32 = undefined;
+        const on = onTerminal(s, circuit, @intCast(n), 2, &buf) orelse continue;
+        if (on.len != 2) continue;
+        var gates: [group_scan_max]u32 = undefined;
+        if ((onTerminal(s, circuit, @intCast(n), 1, &gates) orelse continue).len > 0) continue;
+        const a = on[0];
+        const b = on[1];
+        if (taken[a][0] or taken[b][0] or !sameType(s, a, b)) continue;
+        const ta = terminals(s, circuit, a).?;
+        const tb = terminals(s, circuit, b).?;
+        if (ta[1] == tb[1] or ta[0] == tb[0]) continue;
+        try addGroup(s, list, .pair, &.{ a, b }, taken, false);
+    }
+}
+
+/// G3: transistors of one type share a gate net (not a rail) and a source
+/// net, one of them diode-connected (its drain on the gate net).
+fn currentMirrors(s: *Schematic, circuit: *const Circuit.Graph, taken: [][2]bool, list: *std.ArrayList(Group)) !void {
+    for (s.roles, 0..) |role, g| {
+        if (isRail(role)) continue;
+        var buf: [group_scan_max]u32 = undefined;
+        const on = onTerminal(s, circuit, @intCast(g), 1, &buf) orelse continue;
+        for (on) |a| {
+            if (taken[a][0]) continue;
+            const ta = terminals(s, circuit, a).?;
+            var members: [group_scan_max]u32 = undefined;
+            var n: usize = 0;
+            var diode = false;
+            for (on) |b| {
+                const tb = terminals(s, circuit, b).?;
+                if (taken[b][0] or !sameType(s, a, b) or tb[2] != ta[2]) continue;
+                members[n] = b;
+                n += 1;
+                diode = diode or tb[0] == g;
+            }
+            if (n >= 2 and diode) try addGroup(s, list, .mirror, members[0..n], taken, false);
+        }
+    }
+}
+
+/// G2, G1: a pair O9 left alone is mirrored the same way, its gates facing
+/// outwards (smaller `x_key` on the left); a cross-coupled pair is mirrored
+/// with its gates facing each other. Vertical transistors only.
+fn mirrorGroups(s: *Schematic, fixed: []bool) void {
+    const orientation = s.devices.items(.orientation);
+    const flip_x = s.devices.items(.flip_x);
+    const half = s.devices.items(.pair_half);
+    for (s.groups) |g| {
+        if ((g.kind != .pair and g.kind != .cross) or g.members.len != 2) continue;
+        const lo = g.members[0];
+        const hi = g.members[1];
+        if (fixed[lo] or fixed[hi] or orientation[lo] != .vertical or orientation[hi] != .vertical) continue;
+        const gate_lo = s.pinSide(lo, 1) orelse continue;
+        const gate_hi = s.pinSide(hi, 1) orelse continue;
+        if (!gate_lo.isHorizontal() or !gate_hi.isHorizontal()) continue;
+        const outwards = g.kind == .pair;
+        if ((gate_lo == .left) != outwards) flip_x[lo] = !flip_x[lo];
+        if ((gate_hi == .right) != outwards) flip_x[hi] = !flip_x[hi];
+        std.debug.assert((s.pinSide(lo, 1).? == .left) == outwards);
+        std.debug.assert((s.pinSide(hi, 1).? == .right) == outwards);
+        if (g.kind == .pair) {
+            half[lo] = .left;
+            half[hi] = .right;
+        }
+        fixed[lo] = true;
+        fixed[hi] = true;
     }
 }
 
