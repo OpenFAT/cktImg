@@ -1,4 +1,4 @@
-//! The Zig package at the repository root, so `zig fetch git+https://github.com/OmarSiwy/cktImg`
+//! The Zig package at the repository root, so `zig fetch git+https://github.com/OpenFAT/cktImg`
 //! and release tarballs both give a consumer `NetlistParser`. The build is engine/build.zig;
 //! this file only forwards its options, module, installed artifacts and steps.
 

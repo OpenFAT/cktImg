@@ -13,14 +13,14 @@ license = "MIT"
 rust-version = "1.95"
 
 [workspace.dependencies]
-schemify-abi = { git = "https://github.com/OmarSiwy/Schemify", rev = "7a37e03be23fbc3fb743fa53c6430e7ab77941a0", features = ["guest"] }
-schemify-format = { git = "https://github.com/OmarSiwy/Schemify", rev = "7a37e03be23fbc3fb743fa53c6430e7ab77941a0" }
-schemify-doc = { git = "https://github.com/OmarSiwy/Schemify", rev = "7a37e03be23fbc3fb743fa53c6430e7ab77941a0" }
-schemify-expr = { git = "https://github.com/OmarSiwy/Schemify", rev = "7a37e03be23fbc3fb743fa53c6430e7ab77941a0" }
-schemify-elab = { git = "https://github.com/OmarSiwy/Schemify", rev = "7a37e03be23fbc3fb743fa53c6430e7ab77941a0" }
-schemify-run = { git = "https://github.com/OmarSiwy/Schemify", rev = "7a37e03be23fbc3fb743fa53c6430e7ab77941a0" }
-schemify-plugin = { git = "https://github.com/OmarSiwy/Schemify", rev = "7a37e03be23fbc3fb743fa53c6430e7ab77941a0" }
-schemify-spicecmp = { git = "https://github.com/OmarSiwy/Schemify", rev = "7a37e03be23fbc3fb743fa53c6430e7ab77941a0" }
+schemify-abi = { git = "https://github.com/OpenFAT/Schemify", rev = "1752960b3906f9b29765222531b5bfe29e8f6542", features = ["guest"] }
+schemify-format = { git = "https://github.com/OpenFAT/Schemify", rev = "1752960b3906f9b29765222531b5bfe29e8f6542" }
+schemify-doc = { git = "https://github.com/OpenFAT/Schemify", rev = "1752960b3906f9b29765222531b5bfe29e8f6542" }
+schemify-expr = { git = "https://github.com/OpenFAT/Schemify", rev = "1752960b3906f9b29765222531b5bfe29e8f6542" }
+schemify-elab = { git = "https://github.com/OpenFAT/Schemify", rev = "1752960b3906f9b29765222531b5bfe29e8f6542" }
+schemify-run = { git = "https://github.com/OpenFAT/Schemify", rev = "1752960b3906f9b29765222531b5bfe29e8f6542" }
+schemify-plugin = { git = "https://github.com/OpenFAT/Schemify", rev = "1752960b3906f9b29765222531b5bfe29e8f6542" }
+schemify-spicecmp = { git = "https://github.com/OpenFAT/Schemify", rev = "1752960b3906f9b29765222531b5bfe29e8f6542" }
 
 [package]
 name = "cktimg"

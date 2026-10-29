@@ -1,9 +1,9 @@
 # cktImg
 
-[![ci](https://github.com/OmarSiwy/cktImg/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/OmarSiwy/cktImg/actions/workflows/ci.yml)
+[![ci](https://github.com/OpenFAT/cktImg/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/OpenFAT/cktImg/actions/workflows/ci.yml)
 [![license](https://img.shields.io/github/license/OmarSiwy/cktImg)](LICENSE)
 
-**A [Schemify](https://github.com/OmarSiwy/Schemify) plugin that imports a SPICE netlist as
+**A [Schemify](https://github.com/OpenFAT/Schemify) plugin that imports a SPICE netlist as
 schematics you can keep editing.** Supplies at the top, grounds at the bottom, signal left to
 right, sources that drive a supply or an input drawn apart on the left between their terminal
 symbols, and a net name wherever a wire would cross the circuit. The plugin maps every device
@@ -22,7 +22,7 @@ usable on its own (the secondary interface): LaTeX/TikZ figures, SVG and JSON fr
 
 The repository root is also the Zig package: `build.zig.zon` lists the engine's files and the
 root `build.zig` forwards to `engine/build.zig`, so a Zig project depends on it with
-`zig fetch --save git+https://github.com/OmarSiwy/cktImg#<tag-or-commit>` (or a release
+`zig fetch --save git+https://github.com/OpenFAT/cktImg#<tag-or-commit>` (or a release
 tarball) and `b.dependency("NetlistParser", …)`.
 
 ## Install
@@ -32,7 +32,7 @@ In your Schemify config (`init.lua`), add the package from this repository; it s
 
 ```lua
 schemify.pack.add({
-  { src = "https://github.com/OmarSiwy/cktImg", name = "cktimg",
+  { src = "https://github.com/OpenFAT/cktImg", name = "cktimg",
     grant = { "read_project", "write_project" }, fuel = 100000000000 },
 })
 ```
@@ -156,7 +156,7 @@ Schemify's crates (`schemify-abi`, and for the tests `doc`, `elab`, `run`, `plug
 against a local Schemify checkout, add to `.cargo/config.toml` (not committed):
 
 ```toml
-[patch."https://github.com/OmarSiwy/Schemify"]
+[patch."https://github.com/OpenFAT/Schemify"]
 schemify-abi = { path = "../Schemify/crates/abi" }
 # … one line per schemify-* crate
 ```
