@@ -1,7 +1,7 @@
 # cktImg
 
 [![ci](https://github.com/OpenFAT/cktImg/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/OpenFAT/cktImg/actions/workflows/ci.yml)
-[![license](https://img.shields.io/github/license/OmarSiwy/cktImg)](LICENSE)
+[![license](https://img.shields.io/github/license/OpenFAT/cktImg)](LICENSE)
 
 **A [Schemify](https://github.com/OpenFAT/Schemify) plugin that imports a SPICE netlist as
 schematics you can keep editing.** Supplies at the top, grounds at the bottom, signal left to

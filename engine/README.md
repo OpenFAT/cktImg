@@ -1,10 +1,10 @@
 # cktImg
 
 [![ci](https://github.com/OpenFAT/cktImg/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/OpenFAT/cktImg/actions/workflows/ci.yml)
-[![release](https://img.shields.io/github/v/release/OmarSiwy/cktImg?label=download)](https://github.com/OpenFAT/cktImg/releases/latest)
+[![release](https://img.shields.io/github/v/release/OpenFAT/cktImg?label=download)](https://github.com/OpenFAT/cktImg/releases/latest)
 [![zig](https://img.shields.io/badge/zig-0.17.0-f7a41d?logo=zig&logoColor=white)](https://ziglang.org/download/)
 [![docs](https://img.shields.io/badge/docs-omarsiwy.github.io%2FcktImg-blue)](https://openfat.github.io/cktImg/)
-[![license](https://img.shields.io/github/license/OmarSiwy/cktImg)](LICENSE)
+[![license](https://img.shields.io/github/license/OpenFAT/cktImg)](LICENSE)
 
 **Automatic schematics from SPICE netlists.**
 
